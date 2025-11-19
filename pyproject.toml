@@ -1,0 +1,12 @@
+[project]
+name = "mys10"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "pydantic>=2.11.3",
+    "mcp[cli]>=1.7.0",
+    "asyncio>=3.4.3",
+    "pyyaml>=6.0.3",
+]
