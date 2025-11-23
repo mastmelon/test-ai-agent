@@ -5,8 +5,10 @@ description = "Add your description here"
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
+    "faiss-cpu>=1.10.0",
     "pydantic>=2.11.3",
     "mcp[cli]>=1.7.0",
     "asyncio>=3.4.3",
+    "pymupdf4llm>=0.0.21",
     "pyyaml>=6.0.3",
 ]
