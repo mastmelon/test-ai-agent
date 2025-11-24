@@ -8,6 +8,7 @@ import sys
 from pathlib import Path
 import requests
 import numpy as np
+import traceback
 
 import faiss
 import pymupdf4llm
@@ -93,7 +94,7 @@ def replace_images_with_captions(markdown: str) -> str:
                     mcp_log("INFO", "mcp_server_2.py", f"🗑️ Deleted image after captioning: {img_path}")
             return f"**Image:** {caption}"
         except Exception as e:
-            mcp_log("WARN", "mcp_server_2.py" f"Image deletion failed: {e}")
+            mcp_log("WARN", "mcp_server_2.py", f"Image deletion failed: {e}")
             return f"[Image could not be processed: {src}]"
 
     return re.sub(r'!\[(.*?)\]\((.*?)\)', replace, markdown)
@@ -212,7 +213,7 @@ def process_documents():
     def file_hash(path):
         return hashlib.md5(Path(path).read_bytes()).hexdigest()
 
-    index = faiss.read_index(str(INDEX_FILE)) if INDEX_FILE.exists() else {}
+    index = faiss.read_index(str(INDEX_FILE)) if INDEX_FILE.exists() else None
     metadata = json.loads(METADATA_FILE.read_text()) if METADATA_FILE.exists() else []
     CACHE_META = json.loads(CACHE_FILE.read_text()) if CACHE_FILE.exists() else {}
 
@@ -268,7 +269,7 @@ def process_documents():
                 })
 
             if embeddings_for_file:
-                if index is None:
+                if index is None or not isinstance(index, faiss.Index):
                     dim = len(embeddings_for_file[0])
                     index = faiss.IndexFlatL2(dim)
                 index.add(np.stack(embeddings_for_file))
@@ -283,6 +284,7 @@ def process_documents():
 
         except Exception as e:
             mcp_log("ERROR", "mcp_server_2.py", f"Failed to extract and embed {file.name}: {e}")
+            mcp_log("ERROR", "mcp_server_2.py", traceback.format_exc())
 
 
 if __name__ == "__main__":
