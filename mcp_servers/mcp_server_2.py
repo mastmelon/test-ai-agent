@@ -1,3 +1,4 @@
+import base64
 import hashlib
 import json
 import os.path
@@ -5,10 +6,15 @@ import re
 import signal
 import sys
 from pathlib import Path
+import requests
+import numpy as np
 
 import faiss
 import pymupdf4llm
 from mcp.server import FastMCP
+from tqdm import tqdm
+
+from models import FilePathInput, MarkdownOutput
 
 
 def handle_signal(signum, frame):
@@ -19,8 +25,6 @@ def handle_signal(signum, frame):
 for sig in (signal.SIGINT, signal.SIGTERM):
     signal.signal(sig, handle_signal)
 
-from models import FilePathInput, MarkdownOutput
-
 mcp = FastMCP("Documents")
 
 EMBED_URL = "http://localhost:11434/api/embeddings"
@@ -28,7 +32,7 @@ OLLAMA_CHAT_URL = "http://localhost:11434/api/chat"
 OLLAMA_URL = "http://localhost:11434/api/generate"
 EMBED_MODEL = "nomic-embed-text"
 GEMMA_MODEL = "gemma3:12b"
-PHI_MODEL = "phi4:latest"
+PHI_MODEL = "phi4-mini:latest"
 QWEN_MODEL = "qwen2.5:32b-instruct-q4_0 "
 CHUNK_SIZE = 256
 CHUNK_OVERLAP = 40
@@ -97,13 +101,102 @@ def replace_images_with_captions(markdown: str) -> str:
 
 def caption_image(img_url_or_path: str) -> str:
     mcp_log("INFO", "mcp_server_2.py", f"Attempting to caption image: {img_url_or_path}")
-    # TODO - Complete method
-    return "dummy caption"
+    return f"[Image could not be processed: {img_url_or_path}]"
+
+    # full_path = Path(__file__).parent / "documents" / img_url_or_path
+    # full_path.resolve()
+    #
+    # if not full_path.exists():
+    #     mcp_log("ERROR", "mcp_server_2.py", f"Image file not found: {full_path}")
+    #
+    # try:
+    #     if img_url_or_path.startswith("http"):
+    #         image_result = requests.get(img_url_or_path)
+    #         encoded_image = base64.b64encode(image_result.content).decode("utf-8")
+    #     else:
+    #         with open(full_path, "rb") as img_file:
+    #             encoded_image = base64.b64encode(img_file.read()).decode("utf-8")
+    #
+    #
+    #
+    # except Exception as e:
+    #     mcp_log("ERROR", "mcp_server_2.py", f"Failed to caption image: {img_url_or_path}: {e}")
+    #     return f"[Image could not be processed: {img_url_or_path}]"
 
 
 def mcp_log(level: str, filename: str, message: str) -> None:
     sys.stderr.write(f"{level}: {filename}: {message}\n")
     sys.stderr.flush()
+
+
+def semantic_merge(text: str) -> list[str]:
+    """Splits text semantically using LLM: detects second topic and reuses leftover intelligently."""
+    WORD_LIMIT = 512
+    words = text.split()
+    i = 0
+    final_chunks = []
+
+    while i < len(words):
+        # 1. Take next chunk of words (and prepend leftovers if any)
+        chunk_words = words[i:i + WORD_LIMIT]
+        chunk_text = " ".join(chunk_words).strip()
+
+        prompt = f"""
+        You are a markdown document segmenter.
+
+        Here is a portion of a markdown document:
+
+        ---
+        {chunk_text}
+        ---
+
+        If this chunk clearly contains **more than one distinct topic or section**, reply ONLY with the **second part**, starting from the first sentence or heading of the new topic.
+
+        If it's only one topic, reply with NOTHING.
+
+        Keep markdown formatting intact.
+        """
+
+        try:
+            result = requests.post(OLLAMA_CHAT_URL, json={
+                "model": PHI_MODEL,
+                "messages": [{"role": "user", "content": prompt}],
+                "stream": False
+            })
+
+            reply = result.json().get("message", {}).get("content", "").strip()
+
+            if reply:
+                split_point = chunk_text.find(reply)
+                if split_point != -1:
+                    mcp_log("INFO", "mcp_server_2.py", f"Split point: {split_point}")
+                    first_part = chunk_text[:split_point].strip()
+                    second_part = reply.strip()
+                    final_chunks.append(first_part)
+
+                    # Get remaining words from second_part and re-use them in next batch
+                    leftover_words = second_part.split()
+                    words = leftover_words + words[i + WORD_LIMIT:]
+                    i = 0
+                    continue
+                else:
+                    final_chunks.append(chunk_text)
+            else:
+                final_chunks.append(chunk_text)
+
+        except Exception as e:
+            mcp_log("ERROR", "mcp_server_2.py", f"Semantic chunking LLM error: {e}")
+            final_chunks.append(chunk_text)
+
+        i += WORD_LIMIT
+
+    return final_chunks
+
+
+def get_embedding(text: str) -> np.ndarray:
+    result = requests.post(EMBED_URL, json={"model": EMBED_MODEL, "input": text})
+    result.raise_for_status()
+    return np.array(result.json()["embedding"], dtype=np.float32)
 
 
 def process_documents():
@@ -119,7 +212,6 @@ def process_documents():
     def file_hash(path):
         return hashlib.md5(Path(path).read_bytes()).hexdigest()
 
-
     index = faiss.read_index(str(INDEX_FILE)) if INDEX_FILE.exists() else {}
     metadata = json.loads(METADATA_FILE.read_text()) if METADATA_FILE.exists() else []
     CACHE_META = json.loads(CACHE_FILE.read_text()) if CACHE_FILE.exists() else {}
@@ -132,7 +224,6 @@ def process_documents():
 
     for file in DOC_PATH.glob("*"):
         if not file.is_file():
-            mcp_log("INFO", "mcp_server_2.py", f"here: {file.name}")
             continue
 
         try:
@@ -149,8 +240,46 @@ def process_documents():
             if file_extension == ".pdf":
                 mcp_log("INFO", "mcp_server_2.py", f"Using MuPDF4LLM to extract {file.name}")
                 markdown = extract_pdf(FilePathInput(file_path=str(file))).markdown
+                # TODO - add rest of the extensions here
 
-            # TODO - add rest of the conditions here and complete embedding logic
+            if not markdown.strip():
+                mcp_log("WARN", "mcp_server_2.py", f"No content extracted from {file.name}")
+                continue
+
+            if len(markdown.split()) < 10:
+                mcp_log("WARN", "mcp_server_2.py",
+                        f"Content too short for semantic merge in {file.name} → Skipping chunking.")
+                chunks = [markdown.strip()]
+            else:
+                mcp_log("INFO", "mcp_server_2.py",
+                        f"Running semantic merge on {file.name} with {len(markdown.split())} words")
+                chunks = semantic_merge(markdown)
+                mcp_log("INFO", "mcp_server_2.py", f"Number of chunks: {len(chunks)}")
+
+            embeddings_for_file = []
+            new_metadata = []
+            for i, chunk in enumerate(tqdm(chunks, desc=f"Embedding {file.name}")):
+                embedding = get_embedding(chunk)
+                embeddings_for_file.append(embedding)
+                new_metadata.append({
+                    "doc": file.name,
+                    "chunk": chunk,
+                    "chunk_id": f"{file.stem}_{i}"
+                })
+
+            if embeddings_for_file:
+                if index is None:
+                    dim = len(embeddings_for_file[0])
+                    index = faiss.IndexFlatL2(dim)
+                index.add(np.stack(embeddings_for_file))
+                metadata.extend(new_metadata)
+                CACHE_META[file.name] = fhash
+
+                # Save index and metadata
+                CACHE_FILE.write_text(json.dumps(CACHE_META, indent=2))
+                METADATA_FILE.write_text(json.dumps(metadata, indent=2))
+                faiss.write_index(index, str(INDEX_FILE))
+                mcp_log("SAVE","mcp_server_2.py", f"Saved FAISS index and metadata after processing {file.name}")
 
         except Exception as e:
             mcp_log("ERROR", "mcp_server_2.py", f"Failed to extract and embed {file.name}: {e}")

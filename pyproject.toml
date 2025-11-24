@@ -11,4 +11,6 @@ dependencies = [
     "asyncio>=3.4.3",
     "pymupdf4llm>=0.0.21",
     "pyyaml>=6.0.3",
+    "requests>=2.32.3",
+    "tqdm>=4.67.1"
 ]
