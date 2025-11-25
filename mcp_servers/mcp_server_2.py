@@ -6,16 +6,18 @@ import re
 import signal
 import sys
 from pathlib import Path
+
 import requests
 import numpy as np
 import traceback
 
 import faiss
 import pymupdf4llm
+import trafilatura
 from mcp.server import FastMCP
 from tqdm import tqdm
 
-from models import FilePathInput, MarkdownOutput
+from models import FilePathInput, MarkdownOutput, SearchDocumentsInput, UrlInput
 
 
 def handle_signal(signum, frame):
@@ -66,6 +68,45 @@ def extract_pdf(input: FilePathInput) -> MarkdownOutput:
         r'![](images/\2)',
         markdown.replace("\\", "/")
     )
+
+    markdown = replace_images_with_captions(markdown)
+    return MarkdownOutput(markdown=markdown)
+
+
+@mcp.tool()
+def search_stored_documents_rag(input: SearchDocumentsInput) -> list[str]:
+    """Search old stored documents like PDF, DOCX, TXT, etc. to get relevant extracts. """
+    ensure_faiss_ready()
+    query = input.query
+    mcp_log("SEARCH", "mcp_server_2.py", f"Query: {query}")
+    try:
+        index = faiss.read_index(str(ROOT / "faiss_index" / "index.bin"))
+        metadata = json.loads((ROOT / "faiss_index" / "metadata.json").read_text())
+        query_vec = get_embedding(query).reshape(1, -1)
+        D, I = index.search(query_vec, k=5)
+        results = []
+        for idx in I[0]:
+            data = metadata[idx]
+            results.append(f"{data['chunk']}\n[Source: {data['doc']}, ID: {data['chunk_id']}]")
+        return results
+    except Exception as e:
+        return [f"ERROR: Failed to search: {str(e)}"]
+
+
+@mcp.tool()
+def convert_webpage_url_into_markdown(input: UrlInput) -> MarkdownOutput:
+    """Return clean webpage content without Ads, and clutter. """
+    downloaded = trafilatura.fetch_url(input.url)
+    if not downloaded:
+        return MarkdownOutput(markdown="Failed to download the webpage.")
+
+    markdown = trafilatura.extract(
+        downloaded,
+        include_comments=False,
+        include_tables=True,
+        include_images=True,
+        output_format='markdown'
+    ) or ""
 
     markdown = replace_images_with_captions(markdown)
     return MarkdownOutput(markdown=markdown)
@@ -280,11 +321,21 @@ def process_documents():
                 CACHE_FILE.write_text(json.dumps(CACHE_META, indent=2))
                 METADATA_FILE.write_text(json.dumps(metadata, indent=2))
                 faiss.write_index(index, str(INDEX_FILE))
-                mcp_log("SAVE","mcp_server_2.py", f"Saved FAISS index and metadata after processing {file.name}")
+                mcp_log("SAVE", "mcp_server_2.py", f"Saved FAISS index and metadata after processing {file.name}")
 
         except Exception as e:
             mcp_log("ERROR", "mcp_server_2.py", f"Failed to extract and embed {file.name}: {e}")
             mcp_log("ERROR", "mcp_server_2.py", traceback.format_exc())
+
+
+def ensure_faiss_ready():
+    index_path = ROOT / "faiss_index" / "index.bin"
+    meta_path = ROOT / "faiss_index" / "metadata.json"
+    if not (index_path.exists() and meta_path.exists()):
+        mcp_log("INFO", "mcp_server_2.py", "Index not found — running process_documents()...")
+        process_documents()
+    else:
+        mcp_log("INFO", "mcp_server_2.py", "Index already exists. Skipping regeneration.")
 
 
 if __name__ == "__main__":

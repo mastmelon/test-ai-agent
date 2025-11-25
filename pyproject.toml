@@ -14,4 +14,10 @@ dependencies = [
     "requests>=2.32.3",
     "tqdm>=4.67.1",
     "bs4>=0.0.2",
+    "pillow>=11.2.1",
+    "trafilatura[all]>=2.0.0",
+    "dotenv>=0.9.9",
+    "httpx>=0.28.1",
+    "llama-index>=0.12.31",
+    "llama-index-embeddings-google-genai>=0.1.0"
 ]
